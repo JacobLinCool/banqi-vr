@@ -42,7 +42,6 @@ This file provides:
   - MCTSConfig
   - PIMCTreeReuse (root reuse across moves; resets on flips)
   - pimc_mcts_policy (stateless convenience wrapper)
-  - run_mcts_on_env (single-determinization MCTS)
 
 """
 
@@ -737,20 +736,6 @@ class PIMCTreeReuse:
         pi_play = _visits_to_pi(visits, legal, temperature=float(self.cfg.temperature))
         v_root = self.tree.root_value()
         return pi_play, visits, float(v_root)
-
-
-def run_mcts_on_env(
-    root_env: BanqiEnv,
-    policy_value_fn: PolicyValueFn,
-    cfg: MCTSConfig,
-    max_history: int,
-) -> np.ndarray:
-    """Run PUCT MCTS on a (determinized) environment and return root visit counts [A]."""
-    tree = InfoSetMCTree(cfg=cfg, max_history=max_history)
-    tree.reset(root_env, policy_value_fn)
-    root_noise = tree.make_root_noise(action_dim=len(root_env.action_space))
-    tree.search(root_env, policy_value_fn=policy_value_fn, root_noise=root_noise)
-    return tree.root_visits(action_dim=len(root_env.action_space))
 
 
 def pimc_mcts_policy(

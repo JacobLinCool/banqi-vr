@@ -89,12 +89,6 @@ def piece_id(color: int, kind: int) -> int:
     return color * 7 + kind + 1
 
 
-def decode_piece_id(pid: int) -> Tuple[int, int]:
-    assert 1 <= pid <= 14
-    pid0 = pid - 1
-    return pid0 // 7, pid0 % 7
-
-
 def is_cannon(pid: int) -> bool:
     return bool(PID_IS_CANNON[pid])
 

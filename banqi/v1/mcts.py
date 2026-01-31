@@ -21,7 +21,6 @@ from .env import BanqiEnv, Observation
 from .mcts_core import MCTSConfig
 from .mcts_core import PIMCTreeReuse as _PIMCTreeReuse
 from .mcts_core import pimc_mcts_policy as _pimc_policy
-from .mcts_core import run_mcts_on_env as _run_mcts
 from .model import BanqiTransformer, ModelOutputs
 
 
@@ -140,23 +139,6 @@ def evaluate(
     value = float(values_b[0])
     legal_mask = obs.action_mask.astype(np.bool_)
     return priors, value, legal_mask
-
-
-@torch.no_grad()
-def run_mcts_on_env(
-    root_env: BanqiEnv,
-    model: BanqiTransformer,
-    cfg: MCTSConfig,
-    device: torch.device,
-) -> np.ndarray:
-    """Backwards-compatible wrapper: run MCTS on a determinized env using the torch model."""
-
-    def pv_fn(obs_list: List[Observation]) -> Tuple[np.ndarray, np.ndarray]:
-        return evaluate_batch(model, obs_list, device=device)
-
-    return _run_mcts(
-        root_env, policy_value_fn=pv_fn, cfg=cfg, max_history=model.cfg.max_history
-    )
 
 
 @torch.no_grad()
