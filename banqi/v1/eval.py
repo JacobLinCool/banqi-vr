@@ -2,7 +2,9 @@
 
 Modes:
 1) Arena evaluation between two checkpoints:
-   uv run -m banqi.v1.eval --mode arena --checkpoint_a a --checkpoint_b b --num_games 100
+    uv run -m banqi.v1.eval --mode arena --checkpoint_a a --checkpoint_b b --num_games 100
+2) Model vs random policy:
+    uv run -m banqi.v1.eval --mode random --checkpoint a --num_games 100
 
 Note: Arena uses the same root-sampling ISMCTS as training.
 """
@@ -51,6 +53,46 @@ def play_arena_game(
             a_id = int(np.random.choice(legal_ids))
         else:
             a_id = int(np.argmax(pi))  # eval: greedy
+
+        env.step(a_id)
+        plies += 1
+
+    if env.winner is None:
+        return -1
+    return int(env.winner)
+
+
+def play_random_game(
+    model: BanqiTransformer,
+    device: torch.device,
+    action_space: ActionSpace,
+    mcts_cfg: MCTSConfig,
+    max_history: int,
+    max_plies: int = 512,
+) -> int:
+    """Returns winner player id (0 or 1) or -1 for draw.
+
+    Player 0 uses model, Player 1 is random.
+    """
+    env = BanqiEnv(action_space=action_space, max_history=max_history)
+
+    plies = 0
+    while not env.done and plies < max_plies:
+        obs = env.observe(max_history=max_history)
+
+        if env.to_play == 0:
+            pi, _visits, _v_root = pimc_mcts_policy(env, model, mcts_cfg, device=device)
+            legal = obs.action_mask.astype(np.bool_)
+            pi[~legal] = 0.0
+            if pi.sum() <= 0:
+                legal_ids = np.nonzero(legal)[0]
+                a_id = int(np.random.choice(legal_ids))
+            else:
+                a_id = int(np.argmax(pi))  # eval: greedy
+        else:
+            legal = obs.action_mask.astype(np.bool_)
+            legal_ids = np.nonzero(legal)[0]
+            a_id = int(np.random.choice(legal_ids))
 
         env.step(a_id)
         plies += 1
@@ -110,9 +152,51 @@ def arena_eval(args: argparse.Namespace) -> None:
         )
 
 
+def random_eval(args: argparse.Namespace) -> None:
+    device = torch.device(args.device)
+    action_space = ActionSpace()
+
+    model, _ = load_checkpoint(Path(args.checkpoint))
+    model = model.to(device)
+    model.eval()
+
+    max_history = model.cfg.max_history
+
+    mcts_cfg = MCTSConfig(
+        num_simulations=args.num_simulations,
+        c_puct=args.c_puct,
+        dirichlet_alpha=0.0,
+        dirichlet_epsilon=0.0,
+        temperature=0.0,  # greedy
+        num_determinize=args.num_determinize,
+    )
+
+    wins = {0: 0, 1: 0, -1: 0}
+    for g in range(args.num_games):
+        w = play_random_game(
+            model=model,
+            device=device,
+            action_space=action_space,
+            mcts_cfg=mcts_cfg,
+            max_history=max_history,
+            max_plies=args.max_plies,
+        )
+        wins[w] += 1
+        print(f"[random] game {g + 1}/{args.num_games} winner: {w}")
+
+    print("---- Random results ----")
+    print(f"Model wins (P0): {wins[0]}")
+    print(f"Random wins (P1): {wins[1]}")
+    print(f"Draws          : {wins[-1]}")
+    if args.num_games > 0:
+        print(
+            f"Model winrate: {wins[0] / args.num_games:.3f} (draws {wins[-1] / args.num_games:.3f})"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
-    p.add_argument("--mode", choices=["arena"], required=True)
+    p.add_argument("--mode", choices=["arena", "random"], required=True)
 
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--bf16", action="store_true")
@@ -126,14 +210,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num_determinize", type=int, default=8)
     p.add_argument("--c_puct", type=float, default=1.5)
 
+    # random mode
+    p.add_argument("--checkpoint", type=str, default="")
+
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    if not args.checkpoint_a or not args.checkpoint_b:
-        raise ValueError("--checkpoint_a and --checkpoint_b required for arena mode")
-    arena_eval(args)
+    if args.mode == "arena":
+        if not args.checkpoint_a or not args.checkpoint_b:
+            raise ValueError(
+                "--checkpoint_a and --checkpoint_b required for arena mode"
+            )
+        arena_eval(args)
+    elif args.mode == "random":
+        if not args.checkpoint:
+            raise ValueError("--checkpoint required for random mode")
+        random_eval(args)
+    else:
+        raise ValueError(f"Unknown mode: {args.mode}")
 
 
 if __name__ == "__main__":
