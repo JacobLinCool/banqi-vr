@@ -40,7 +40,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
 from .actions import ActionSpace
-from .async_common import InferenceClient, ReplayBuffer
+from .async_common import DummyWriter, InferenceClient, ReplayBuffer, collate_batch
 from .env import COVERED_TOK, BanqiEnv
 from .loss import LossConfig, MultiTaskLoss
 from .mcts_core import MCTSConfig, PIMCTreeReuse, pimc_mcts_policy
@@ -397,22 +397,6 @@ def learner_process(
     weight_q: mp.Queue,
     stop_event: MpEvent,
 ) -> None:
-    class _DummyWriter:
-        def add_scalar(self, *args, **kwargs):
-            return None
-
-        def add_text(self, *args, **kwargs):
-            return None
-
-        def add_hparams(self, *args, **kwargs):
-            return None
-
-        def flush(self):
-            return None
-
-        def close(self):
-            return None
-
     set_seed(int(args.seed))
     torch.manual_seed(int(args.seed))
 
@@ -478,7 +462,7 @@ def learner_process(
     writer = (
         SummaryWriter(log_dir=str(save_dir / "tb_split"))
         if SummaryWriter is not None
-        else _DummyWriter()
+        else DummyWriter()
     )
 
     replay = ReplayBuffer(
@@ -499,58 +483,6 @@ def learner_process(
         unit="step",
         dynamic_ncols=True,
     )
-
-    def collate(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        B = len(batch)
-        board = torch.tensor(
-            np.stack([b["board_tokens"] for b in batch]), dtype=torch.long
-        )
-        belief = torch.tensor(
-            np.stack([b["belief"] for b in batch]), dtype=torch.float32
-        )
-        to_play_color = torch.tensor(
-            [b["to_play_color"] for b in batch], dtype=torch.long
-        )
-        plies = torch.tensor([b.get("plies", 0) for b in batch], dtype=torch.long)
-        no_progress_plies = torch.tensor(
-            [b.get("no_progress_plies", 0) for b in batch], dtype=torch.long
-        )
-        action_mask = torch.tensor(
-            np.stack([b["action_mask"] for b in batch]), dtype=torch.bool
-        )
-        pi_self = torch.tensor(
-            np.stack([b["pi_self"] for b in batch]), dtype=torch.float32
-        )
-        value = torch.tensor([b["value"] for b in batch], dtype=torch.float32)
-        v_root = torch.tensor(
-            [b.get("v_root", 0.0) for b in batch], dtype=torch.float32
-        )
-        belief_t = torch.tensor(
-            np.stack([b.get("belief_target", b["belief"]) for b in batch]),
-            dtype=torch.float32,
-        )
-
-        H = args.max_history
-        hist = np.full((B, H), -1, dtype=np.int64)
-        for i, b in enumerate(batch):
-            h = b["history_actions"][-H:]
-            if len(h) > 0:
-                hist[i, -len(h) :] = h
-        history = torch.tensor(hist, dtype=torch.long)
-
-        return {
-            "board": board,
-            "belief": belief,
-            "history": history,
-            "to_play_color": to_play_color,
-            "plies": plies,
-            "no_progress_plies": no_progress_plies,
-            "action_mask": action_mask,
-            "pi_self": pi_self,
-            "value": value,
-            "v_root": v_root,
-            "belief_target": belief_t,
-        }
 
     def write_weights(step: int) -> None:
         tmp = save_dir / "_infer_weights.tmp"
@@ -733,7 +665,7 @@ def learner_process(
         pbar.update(1)
 
         idx, batch_samples = replay.sample(args.batch_size)
-        batch = collate(batch_samples)
+        batch = collate_batch(batch_samples, max_history=args.max_history)
 
         board = batch["board"].to(device, non_blocking=True)
         belief = batch["belief"].to(device, non_blocking=True)
