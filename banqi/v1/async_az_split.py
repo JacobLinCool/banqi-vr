@@ -40,6 +40,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
 from .actions import ActionSpace
+from .async_common import InferenceClient, ReplayBuffer
 from .env import COVERED_TOK, BanqiEnv
 from .loss import LossConfig, MultiTaskLoss
 from .mcts_core import MCTSConfig, PIMCTreeReuse, pimc_mcts_policy
@@ -55,84 +56,6 @@ from .utils import (
     set_seed,
     visits_to_pi,
 )
-
-
-# ----------------- Inference client -----------------
-class InferenceClient:
-    def __init__(
-        self,
-        actor_id: int,
-        req_q: mp.Queue,
-        resp_q: mp.Queue,
-        max_history: int,
-        timing_every: int = 0,
-    ) -> None:
-        self.actor_id = int(actor_id)
-        self.req_q = req_q
-        self.resp_q = resp_q
-        self.max_history = int(max_history)
-        self._timing_every = int(timing_every)
-        self._timing_count = 0
-        self._req_id = 0
-        self._stash: Dict[int, Dict[str, Any]] = {}
-
-    def policy_value_batch(self, obs_list: List[Any]) -> Tuple[np.ndarray, np.ndarray]:
-        B = len(obs_list)
-        board = np.stack([o.board_tokens for o in obs_list]).astype(
-            np.int64, copy=False
-        )
-        belief = np.stack([o.belief for o in obs_list]).astype(np.float32, copy=False)
-        to_play_color = np.asarray([o.to_play_color for o in obs_list], dtype=np.int64)
-        plies = np.asarray([o.plies for o in obs_list], dtype=np.int64)
-        no_progress_plies = np.asarray(
-            [o.no_progress_plies for o in obs_list], dtype=np.int64
-        )
-        legal = np.stack([o.action_mask for o in obs_list]).astype(np.bool_, copy=False)
-
-        H = self.max_history
-        hist = np.full((B, H), -1, dtype=np.int64)
-        if H > 0:
-            for i, o in enumerate(obs_list):
-                h = o.history_actions
-                h = h[-H:]
-                if len(h) > 0:
-                    hist[i, -len(h) :] = h
-
-        self._req_id += 1
-        rid = self._req_id
-        self._timing_count += 1
-        t_send = time.perf_counter() if self._timing_every > 0 else 0.0
-        self.req_q.put(
-            {
-                "type": "infer",
-                "actor_id": self.actor_id,
-                "req_id": rid,
-                "board": board,
-                "belief": belief,
-                "history": hist,
-                "to_play_color": to_play_color,
-                "plies": plies,
-                "no_progress_plies": no_progress_plies,
-                "legal": legal,
-            }
-        )
-
-        if rid in self._stash:
-            resp = self._stash.pop(rid)
-        else:
-            while True:
-                resp = self.resp_q.get()
-                if int(resp.get("req_id")) == rid:
-                    break
-                self._stash[int(resp["req_id"])] = resp
-
-        if self._timing_every > 0 and (self._timing_count % self._timing_every == 0):
-            t_recv = time.perf_counter()
-            print(f"[actor {self.actor_id}] infer_wait={t_recv - t_send:.3f}s B={B}")
-
-        return resp["priors"].astype(np.float32, copy=False), resp["values"].astype(
-            np.float32, copy=False
-        )
 
 
 # ----------------- Actor process -----------------
@@ -466,74 +389,6 @@ def inference_server_process(
             )
 
     print("[infer] shutdown")
-
-
-# ----------------- Learner (GPU) -----------------
-class ReplayBuffer:
-    def __init__(
-        self,
-        capacity: int,
-        prioritized: bool = False,
-        alpha: float = 0.6,
-        eps: float = 1e-3,
-    ) -> None:
-        self.capacity = int(capacity)
-        self.data: List[Dict[str, Any]] = []
-        self.pos = 0
-
-        self.prioritized = bool(prioritized)
-        self.alpha = float(alpha)
-        self.eps = float(eps)
-        self.priorities: List[float] = []
-        self.max_priority: float = 1.0
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-    def add_many(self, samples: List[Dict[str, Any]]) -> None:
-        for s in samples:
-            if len(self.data) < self.capacity:
-                self.data.append(s)
-                if self.prioritized:
-                    self.priorities.append(self.max_priority)
-            else:
-                self.data[self.pos] = s
-                if self.prioritized:
-                    self.priorities[self.pos] = self.max_priority
-                self.pos = (self.pos + 1) % self.capacity
-
-    def sample(self, batch_size: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
-        if len(self.data) < batch_size:
-            raise ValueError(
-                f"Not enough samples: have {len(self.data)}, need {batch_size}"
-            )
-
-        n = len(self.data)
-        if not self.prioritized:
-            idx = np.random.randint(0, n, size=(batch_size,), dtype=np.int64)
-            return idx, [self.data[int(i)] for i in idx]
-
-        prios = np.asarray(self.priorities, dtype=np.float64)
-        p = np.power(prios + self.eps, self.alpha)
-        z = p.sum()
-        if not np.isfinite(z) or z <= 0:
-            idx = np.random.randint(0, n, size=(batch_size,), dtype=np.int64)
-            return idx, [self.data[int(i)] for i in idx]
-
-        p /= z
-        idx = np.random.choice(n, size=(batch_size,), replace=True, p=p).astype(
-            np.int64
-        )
-        return idx, [self.data[int(i)] for i in idx]
-
-    def update_priorities(self, idx: np.ndarray, prios: np.ndarray) -> None:
-        if not self.prioritized:
-            return
-        for i, p in zip(idx.tolist(), prios.tolist()):
-            pp = float(max(self.eps, p))
-            self.priorities[int(i)] = pp
-            if pp > self.max_priority:
-                self.max_priority = pp
 
 
 def learner_process(
