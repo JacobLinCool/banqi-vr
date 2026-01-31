@@ -18,10 +18,82 @@ import numpy as np
 import torch
 
 from .actions import ActionSpace
-from .env import BanqiEnv
+from .env import (
+    BLACK,
+    KIND_COUNTS,
+    KIND_NAMES,
+    PID_COLOR,
+    PID_KIND,
+    RED,
+    BanqiEnv,
+)
 from .mcts import MCTSConfig, pimc_mcts_policy
 from .model import BanqiTransformer
 from .utils import load_checkpoint
+
+
+def _color_label(color: int | None) -> str:
+    if color is None:
+        return "?"
+    return "R" if int(color) == RED else "B"
+
+
+def _summarize_game(env: BanqiEnv, max_plies: int) -> dict[str, object]:
+    total_per_color = sum(KIND_COUNTS.values())
+    captured_by_color = {RED: 0, BLACK: 0}
+    captured_by_kind = {
+        RED: {k: 0 for k in range(len(KIND_NAMES))},
+        BLACK: {k: 0 for k in range(len(KIND_NAMES))},
+    }
+
+    for pid in env.captured:
+        color = int(PID_COLOR[pid])
+        kind = int(PID_KIND[pid])
+        captured_by_color[color] += 1
+        captured_by_kind[color][kind] += 1
+
+    remaining_by_color = {
+        RED: total_per_color - captured_by_color[RED],
+        BLACK: total_per_color - captured_by_color[BLACK],
+    }
+
+    if env.winner is None:
+        if env.no_progress_plies >= env.draw_plies:
+            reason = "no-progress"
+        elif env.plies >= max_plies:
+            reason = "max-plies"
+        else:
+            reason = "draw"
+    else:
+        if remaining_by_color[RED] == 0 or remaining_by_color[BLACK] == 0:
+            reason = "all-captured"
+        else:
+            reason = "stalemate"
+
+    return {
+        "plies": int(env.plies),
+        "no_progress_plies": int(env.no_progress_plies),
+        "winner": env.winner,
+        "reason": reason,
+        "player_colors": (
+            _color_label(env.player_color[0]),
+            _color_label(env.player_color[1]),
+        ),
+        "captured_by_color": captured_by_color,
+        "remaining_by_color": remaining_by_color,
+        "captured_by_kind": captured_by_kind,
+        "final_board": env.render(),
+    }
+
+
+def _format_captured_by_kind(captured_by_kind: dict[int, dict[int, int]]) -> str:
+    def fmt(color: int) -> str:
+        parts = []
+        for k, name in enumerate(KIND_NAMES):
+            parts.append(f"{name}{captured_by_kind[color][k]}")
+        return " ".join(parts)
+
+    return f"R: {fmt(RED)} | B: {fmt(BLACK)}"
 
 
 def play_arena_game(
@@ -32,8 +104,8 @@ def play_arena_game(
     mcts_cfg: MCTSConfig,
     max_history: int,
     max_plies: int = 512,
-) -> int:
-    """Returns winner player id (0 or 1) or -1 for draw.
+) -> tuple[int, dict[str, object]]:
+    """Returns (winner player id (0 or 1) or -1 for draw, summary dict).
 
     Player 0 uses model_a, Player 1 uses model_b.
     """
@@ -57,9 +129,10 @@ def play_arena_game(
         env.step(a_id)
         plies += 1
 
+    summary = _summarize_game(env, max_plies=max_plies)
     if env.winner is None:
-        return -1
-    return int(env.winner)
+        return -1, summary
+    return int(env.winner), summary
 
 
 def play_random_game(
@@ -69,8 +142,8 @@ def play_random_game(
     mcts_cfg: MCTSConfig,
     max_history: int,
     max_plies: int = 512,
-) -> int:
-    """Returns winner player id (0 or 1) or -1 for draw.
+) -> tuple[int, dict[str, object]]:
+    """Returns (winner player id (0 or 1) or -1 for draw, summary dict).
 
     Player 0 uses model, Player 1 is random.
     """
@@ -97,9 +170,10 @@ def play_random_game(
         env.step(a_id)
         plies += 1
 
+    summary = _summarize_game(env, max_plies=max_plies)
     if env.winner is None:
-        return -1
-    return int(env.winner)
+        return -1, summary
+    return int(env.winner), summary
 
 
 def arena_eval(args: argparse.Namespace) -> None:
@@ -130,7 +204,7 @@ def arena_eval(args: argparse.Namespace) -> None:
 
     wins = {0: 0, 1: 0, -1: 0}
     for g in range(args.num_games):
-        w = play_arena_game(
+        w, summary = play_arena_game(
             model_a=model_a,
             model_b=model_b,
             device=device,
@@ -140,7 +214,27 @@ def arena_eval(args: argparse.Namespace) -> None:
             max_plies=args.max_plies,
         )
         wins[w] += 1
-        print(f"[arena] game {g + 1}/{args.num_games} winner: {w}")
+        p0_color, p1_color = summary["player_colors"]
+        print(
+            "[arena] game "
+            f"{g + 1}/{args.num_games} "
+            f"winner: {w} "
+            f"(P0={p0_color}, P1={p1_color}) "
+            f"plies={summary['plies']} "
+            f"no_progress={summary['no_progress_plies']} "
+            f"reason={summary['reason']} "
+            f"remaining R/B={summary['remaining_by_color'][RED]}/"
+            f"{summary['remaining_by_color'][BLACK]} "
+            f"captured R/B={summary['captured_by_color'][RED]}/"
+            f"{summary['captured_by_color'][BLACK]}"
+        )
+        print(
+            "[arena] captured by kind "
+            f"{_format_captured_by_kind(summary['captured_by_kind'])}"
+        )
+        if args.print_final_board:
+            print("[arena] final board")
+            print(summary["final_board"])
 
     print("---- Arena results ----")
     print(f"A wins (P0): {wins[0]}")
@@ -173,7 +267,7 @@ def random_eval(args: argparse.Namespace) -> None:
 
     wins = {0: 0, 1: 0, -1: 0}
     for g in range(args.num_games):
-        w = play_random_game(
+        w, summary = play_random_game(
             model=model,
             device=device,
             action_space=action_space,
@@ -182,7 +276,27 @@ def random_eval(args: argparse.Namespace) -> None:
             max_plies=args.max_plies,
         )
         wins[w] += 1
-        print(f"[random] game {g + 1}/{args.num_games} winner: {w}")
+        p0_color, p1_color = summary["player_colors"]
+        print(
+            "[random] game "
+            f"{g + 1}/{args.num_games} "
+            f"winner: {w} "
+            f"(P0={p0_color}, P1={p1_color}) "
+            f"plies={summary['plies']} "
+            f"no_progress={summary['no_progress_plies']} "
+            f"reason={summary['reason']} "
+            f"remaining R/B={summary['remaining_by_color'][RED]}/"
+            f"{summary['remaining_by_color'][BLACK]} "
+            f"captured R/B={summary['captured_by_color'][RED]}/"
+            f"{summary['captured_by_color'][BLACK]}"
+        )
+        print(
+            "[random] captured by kind "
+            f"{_format_captured_by_kind(summary['captured_by_kind'])}"
+        )
+        if args.print_final_board:
+            print("[random] final board")
+            print(summary["final_board"])
 
     print("---- Random results ----")
     print(f"Model wins (P0): {wins[0]}")
@@ -212,6 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # random mode
     p.add_argument("--checkpoint", type=str, default="")
+    p.add_argument("--print_final_board", action="store_true")
 
     return p
 

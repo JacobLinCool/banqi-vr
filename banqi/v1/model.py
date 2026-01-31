@@ -47,7 +47,7 @@ class ModelConfig:
 
     # misc
     use_tanh_value: bool = True
-    draw_plies: int = 40
+    draw_plies: int = 100
     max_plies: int = 512
 
 

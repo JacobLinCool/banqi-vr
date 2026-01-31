@@ -93,6 +93,7 @@ class _ZobristTables:
     to_play: np.ndarray  # [2] uint64
     player_color: np.ndarray  # [2,3] uint64
     no_progress: np.ndarray  # [draw_plies+1] uint64
+    captured: np.ndarray  # [max_captures+1, 15] uint64 (capture_index, pid)
 
 
 _ZOBRIST_CACHE: Dict[Tuple[int, int, int], _ZobristTables] = {}
@@ -111,9 +112,15 @@ def _get_zobrist(action_space: ActionSpace, draw_plies: int) -> _ZobristTables:
     no_progress = rng.randint(
         0, 2**63 - 1, size=(int(draw_plies) + 1,), dtype=np.uint64
     )
+    max_captures = int(action_space.num_squares)
+    captured = rng.randint(0, 2**63 - 1, size=(max_captures + 1, 15), dtype=np.uint64)
 
     z = _ZobristTables(
-        piece=piece, to_play=to_play, player_color=player_color, no_progress=no_progress
+        piece=piece,
+        to_play=to_play,
+        player_color=player_color,
+        no_progress=no_progress,
+        captured=captured,
     )
     _ZOBRIST_CACHE[key] = z
     return z
@@ -150,6 +157,14 @@ def _state_hash(env: BanqiEnv, z: _ZobristTables) -> np.uint64:
 
     np_idx = int(min(max(0, env.no_progress_plies), len(z.no_progress) - 1))
     h ^= z.no_progress[np_idx]
+
+    # captured pieces are public info and affect belief; include in hash
+    for k, pid in enumerate(env.captured):
+        if k >= z.captured.shape[0]:
+            break
+        p = int(pid)
+        if 0 <= p < 15:
+            h ^= z.captured[k, p]
 
     return h
 
@@ -205,6 +220,14 @@ def _update_hash_after_action(
     # no_progress_plies
     h ^= z.no_progress[_no_progress_idx(int(undo.prev_no_progress_plies), z)]
     h ^= z.no_progress[_no_progress_idx(int(env.no_progress_plies), z)]
+
+    # captured pieces (order-sensitive hash)
+    if undo.kind == "move":
+        cap_pid = int(undo.prev_piece_dst)
+        if cap_pid != 0:
+            cap_idx = int(undo.prev_captured_len)
+            if 0 <= cap_idx < z.captured.shape[0] and 0 <= cap_pid < 15:
+                h ^= z.captured[cap_idx, cap_pid]
 
     return h
 

@@ -155,7 +155,7 @@ class BanqiEnv:
     def __init__(
         self,
         action_space: ActionSpace,
-        draw_plies: int = 40,
+        draw_plies: int = 100,
         max_history: int = 16,
         seed: Optional[int] = None,
     ) -> None:
